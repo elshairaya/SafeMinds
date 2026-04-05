@@ -25,7 +25,13 @@ class EpochBuilder {
                 null
             }
 
-            val epoch = Epoch(epochStart = currentEpochStart!!, movementScore = meanMovement, hrMean = null)
+            val epoch = Epoch(
+                epochStart = currentEpochStart!!,
+                movementScore = meanMovement,
+                hrMean = hrMean
+            )
+            // old hr code
+            //val epoch = Epoch(epochStart = currentEpochStart!!, movementScore = meanMovement, hrMean = null)
 
             onEpochReady?.invoke(epoch)
 
