@@ -72,9 +72,9 @@ class MainActivity : ComponentActivity() {
     private fun isHeartRateGranted(): Boolean {
         return ContextCompat.checkSelfPermission(
             this,
-            android.Manifest.permission.BODY_SENSORS
+            //android.Manifest.permission.BODY_SENSORS
             // old hr code
-            // "android.permission.health.READ_HEART_RATE"
+             "android.permission.health.READ_HEART_RATE"
         ) == PackageManager.PERMISSION_GRANTED
     }
     private fun isActivityGranted(): Boolean {
@@ -91,9 +91,9 @@ class MainActivity : ComponentActivity() {
     private fun requestPermissions() {
         val permissions = arrayOf(
             android.Manifest.permission.ACTIVITY_RECOGNITION,
-            android.Manifest.permission.BODY_SENSORS
+          //  android.Manifest.permission.BODY_SENSORS
             // old hr code
-            //"android.permission.health.READ_HEART_RATE"
+            "android.permission.health.READ_HEART_RATE"
         )
         permissionLauncher.launch(permissions)
     }

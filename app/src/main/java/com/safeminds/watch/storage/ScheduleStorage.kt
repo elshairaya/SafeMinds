@@ -30,7 +30,7 @@ object ScheduleStorage {
    val sharedPrefs = preferences(context)
    return ScheduleModel(
        nightStartTime = sharedPrefs.getInt(NIGHT_START_KEY, 22 * 60),
-       nightEndTime = sharedPrefs.getInt(NIGHT_END_KEY, 6*60+30),
+       nightEndTime = sharedPrefs.getInt(NIGHT_END_KEY, 4*60+30),
        isHourlyEnabled = sharedPrefs.getBoolean(IS_HOURLY_ENABLED_KEY, true),
        hourlyCheckDuration = sharedPrefs.getInt(HOURLY_CHECK_DURATION_KEY, 3)
    )

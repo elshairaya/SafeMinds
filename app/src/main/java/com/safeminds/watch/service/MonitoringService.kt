@@ -11,29 +11,38 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.safeminds.watch.R
+import com.safeminds.watch.logging.AppLogger
 import com.safeminds.watch.processing.EpochBuilder
 import com.safeminds.watch.processing.MovementProcessor
 import com.safeminds.watch.processing.SessionSummaryBuilder
 import com.safeminds.watch.scheduler.MonitoringSessionType
-import com.safeminds.watch.scheduler.ScheduleModel
 import com.safeminds.watch.scheduler.SessionStatePref
 import com.safeminds.watch.sensors.AccelerometerCollector
 import com.safeminds.watch.sensors.HeartRateCollector
-import com.safeminds.watch.service.MonitoringService.Companion.TAG
+import com.safeminds.watch.sessionTransfer.Sender
+import com.safeminds.watch.sessionTransfer.SharedPrefsRepository
+import com.safeminds.watch.sessionTransfer.TransferController
+import com.safeminds.watch.sessionTransfer.TransferSessionRepository
+import com.safeminds.watch.sessionTransfer.WearMessageSender
 import com.safeminds.watch.storage.SafeMindsStorage
-import com.safeminds.watch.storage.ScheduleStorage
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.Calendar
+import java.util.UUID
 import kotlin.math.sqrt
 
 class MonitoringService : Service() {
 
     companion object {
+        private val serviceJob = SupervisorJob()
+        private val scope = CoroutineScope(Dispatchers.IO + serviceJob)
+
         const val ACTION_START_SESSION = "com.safeminds.watch.action.START_SESSION"
         const val ACTION_STOP_SESSION = "com.safeminds.watch.action.STOP_SESSION"
         const val EXTRA_SESSION_TYPE = "extra_session_type"
@@ -42,6 +51,7 @@ class MonitoringService : Service() {
         private const val CHANNEL_NAME = "SafeMinds Monitoring"
         private const val NOTIFICATION_ID = 1001
         private const val TAG = "SafeMindsService"
+
         @Volatile
         var isServiceRunning: Boolean = false
     }
@@ -65,14 +75,15 @@ class MonitoringService : Service() {
     private var sessionState = SessionState.IDLE
     private var sessionStartTime: Long = 0L
     private var currentSessionType: MonitoringSessionType? = null
+    private var currentSessionId: String? = null
 
-    private val autoStopRunnable = Runnable {
-        Log.d(TAG, "Auto-stop reached for session=$currentSessionType")
-        stopSession()
-    }
+    private lateinit var transferController: TransferController
+    private lateinit var sender: Sender
+    private lateinit var transferSessionRepository: TransferSessionRepository
 
     override fun onCreate() {
         super.onCreate()
+        AppLogger.init(this)
         isServiceRunning = true
 
         storage = SafeMindsStorage(this)
@@ -82,16 +93,17 @@ class MonitoringService : Service() {
         epochBuilder = EpochBuilder()
         summaryBuilder = SessionSummaryBuilder()
         mainHandler = Handler(Looper.getMainLooper())
-
+        transferSessionRepository = SharedPrefsRepository(this)
+        sender = WearMessageSender(this, storage)
+        transferController = TransferController(transferSessionRepository, sender)
 
         setupProcessingPipeline()
         createNotificationChannel()
-        Log.d(TAG, "Service CREATED")
-
+        AppLogger.i(TAG, "Service created")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "onStartCommand action = ${intent?.action}")
+        AppLogger.d(TAG, "onStartCommand action=${intent?.action}")
         when (intent?.action) {
             ACTION_START_SESSION -> {
                 val sessionType = try {
@@ -99,73 +111,66 @@ class MonitoringService : Service() {
                         intent.getStringExtra(EXTRA_SESSION_TYPE)
                             ?: MonitoringSessionType.NIGHT_SESSION.name
                     )
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     MonitoringSessionType.NIGHT_SESSION
                 }
 
                 startSession(sessionType)
             }
+
             ACTION_STOP_SESSION -> stopSession()
-            else -> {
-                Log.d(TAG, "Unknown action received")
-            }
+            else -> AppLogger.w(TAG, "Unknown action received")
         }
         return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-
     private fun setupProcessingPipeline() {
         epochBuilder.onEpochReady = { epoch ->
-            try{
-            summaryBuilder.addEpoch(epoch)
+            try {
+                summaryBuilder.addEpoch(epoch)
                 val epochJson = JSONObject().apply {
+                    put("epochStart", epoch.epochStart)
                     put("movementScore", epoch.movementScore)
                     put("hrMean", epoch.hrMean)
                 }
                 epochLogs.add(epochJson)
-
-                Log.d(
-                    TAG,
-                    "Epoch created: movement=${epoch.movementScore}, hr=${epoch.hrMean}"
-                )
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed while handling epoch", e)
+                AppLogger.d(TAG, "Epoch created movement=${epoch.movementScore}, hr=${epoch.hrMean}")
+            } catch (exception: Exception) {
+                AppLogger.e(TAG, "Failed while handling epoch", exception)
             }
         }
 
         accelerometerCollector.onSampleCollected = { sample ->
-            try{
-            val magnitude = sqrt(
-                (sample.x * sample.x + sample.y * sample.y + sample.z * sample.z).toDouble()
-            ).toFloat()
-            val movement = movementProcessor.processMagnitude(magnitude)
-            epochBuilder.addMovement(sample.timestamp, movement)
-            }catch(e: Exception){
-                Log.e(TAG, "Accelerometer processing failed", e)
-
+            try {
+                val magnitude = sqrt(
+                    (sample.x * sample.x + sample.y * sample.y + sample.z * sample.z).toDouble()
+                ).toFloat()
+                val movement = movementProcessor.processMagnitude(magnitude)
+                epochBuilder.addMovement(sample.timestamp, movement)
+            } catch (exception: Exception) {
+                AppLogger.e(TAG, "Accelerometer processing failed", exception)
             }
         }
 
         heartRateCollector.onHeartRate = { heartRateSample ->
             try {
                 epochBuilder.addHeartRate(heartRateSample.beatsPerMinute)
-            } catch (e: Exception) {
-                Log.e(TAG, "Heart rate processing failed", e)
+            } catch (exception: Exception) {
+                AppLogger.e(TAG, "Heart rate processing failed", exception)
             }
         }
     }
 
     private fun startSession(sessionType: MonitoringSessionType) {
-        Log.d(TAG, "startSession called with type = $sessionType")
+        AppLogger.i(TAG, "startSession called with type=$sessionType")
         if (sessionState == SessionState.RUNNING) {
             if (currentSessionType == sessionType) {
-                Log.d(TAG, "Session already running: $sessionType")
+                AppLogger.d(TAG, "Session already running: $sessionType")
                 return
             }
-//new
-            Log.d(TAG, "Switching session from $currentSessionType to $sessionType")
+            AppLogger.w(TAG, "Switching session from $currentSessionType to $sessionType")
         }
 
         val notification = buildNotification("SafeMinds monitoring running: $sessionType")
@@ -180,112 +185,102 @@ class MonitoringService : Service() {
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
-            Log.d(TAG, "Foreground service started successfully")
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to enter foreground", e)
+            AppLogger.i(TAG, "Foreground service started")
+        } catch (exception: Exception) {
+            AppLogger.e(TAG, "Failed to enter foreground", exception)
             stopSelf()
             return
         }
+
         epochLogs.clear()
         summaryBuilder = SessionSummaryBuilder()
-
         sessionState = SessionState.RUNNING
         currentSessionType = sessionType
+        currentSessionId = UUID.randomUUID().toString()
         sessionStartTime = System.currentTimeMillis()
-        SessionStatePref.setStarted(this, sessionType)
-        Log.d(TAG, "Session state stored: $sessionType")
+
+        SessionStatePref.setStarted(this, sessionType, currentSessionId!!)
+        AppLogger.i(TAG, "Session state stored. sessionId=$currentSessionId")
 
         accelerometerCollector.start()
         heartRateCollector.start()
-        Log.d(TAG, "Sensors started")
+        AppLogger.i(TAG, "Sensors started")
     }
 
     private fun stopSession() {
-        Log.d(TAG, "stopSession called")
+        AppLogger.i(TAG, "stopSession called")
 
         if (sessionState != SessionState.RUNNING) {
-            Log.d(TAG, "Service not running -> clearing stale state")
+            AppLogger.w(TAG, "Service not running. Clearing stale state and stopping")
             SessionStatePref.clear(this)
             isServiceRunning = false
             stopSelf()
             return
         }
-        SessionStatePref.clear(this)
+
+        val sessionId = currentSessionId ?: SessionStatePref.getID(this)
         isServiceRunning = false
         sessionState = SessionState.STOPPING
-        Log.d(TAG, "Session state → STOPPING")
-
+        AppLogger.i(TAG, "Session state -> STOPPING for sessionId=$sessionId")
 
         accelerometerCollector.stop()
         heartRateCollector.stop()
-        Log.d(TAG, "Sensors stopped")
+        AppLogger.i(TAG, "Sensors stopped")
 
-        processAndSaveSession()
+        if (sessionId != null) {
+            processAndSaveSession(sessionId)
+            transferController.createSessionRequest(sessionId)
+            scope.launch {
+                transferController.sendAgain(sessionId)
+            }
+        } else {
+            AppLogger.w(TAG, "No session ID available; skipping save and transfer")
+        }
 
         SessionStatePref.clear(this)
-        Log.d(TAG, "Session state cleared")
-
+        currentSessionId = null
         currentSessionType = null
         sessionState = SessionState.IDLE
-        Log.d(TAG, "Session state → IDLE")
+        AppLogger.i(TAG, "Session state -> IDLE")
 
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
-
-        Log.d(TAG, "Foreground service stopped")
+        AppLogger.i(TAG, "Foreground service stopped")
     }
-    private fun processAndSaveSession() {
+
+    private fun processAndSaveSession(sessionId: String) {
         try {
             val sessionEndTime = System.currentTimeMillis()
             val summary = summaryBuilder.build()
 
             val epochsArray = JSONArray()
-            for (epoch in epochLogs) {
-                epochsArray.put(epoch)
-            }
+            epochLogs.forEach { epoch -> epochsArray.put(epoch) }
 
             val summaryJson = JSONObject().apply {
+                put("sessionId", sessionId)
                 put("sessionStart", sessionStartTime)
                 put("sessionEnd", sessionEndTime)
                 put("sessionType", currentSessionType?.name ?: "UNKNOWN")
-
-                // summary values
                 put("summary", summary.toString())
-
-                // epoch records collected during session
                 put("epochs", epochsArray)
-
-                put("note", "Integrated service with sensors, processing, epoch builder, and summary flow")
+                put("epochCount", epochLogs.size)
+                put("note", "Integrated service with sensors, processing, epoch builder, and transfer-ready storage")
             }
 
             when (currentSessionType) {
-                MonitoringSessionType.NIGHT_SESSION -> {
-                    storage.writeNightSession(summaryJson)
-                    Log.d(TAG, "Night session saved")
-                }
-
-                MonitoringSessionType.HOURLY_CHECK_SESSION -> {
-                    storage.writeHourlyCheck(1, summaryJson)
-                    Log.d(TAG, "Hourly check saved")
-                }
-
-                null -> {
-                    storage.writeNightSession(summaryJson)
-                    Log.d(TAG, "Fallback session saved")
-                }
+                MonitoringSessionType.NIGHT_SESSION -> storage.writeNightSession(sessionId, summaryJson)
+                MonitoringSessionType.HOURLY_CHECK_SESSION -> storage.writeHourlyCheck(sessionId, summaryJson)
+                null -> storage.writeNightSession(sessionId, summaryJson)
             }
 
-            Log.d(TAG, "Session data saved successfully")
-            Log.d(TAG, "Final summary = $summary")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to save session", e)
+            AppLogger.i(TAG, "Session saved successfully for $sessionId")
+            AppLogger.d(TAG, "Final summary = $summary")
+        } catch (exception: Exception) {
+            AppLogger.e(TAG, "Failed to save session $sessionId", exception)
         }
     }
 
     private fun buildNotification(contentText: String): Notification {
-        Log.d(TAG, "Building notification")
-
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("SafeMinds")
@@ -307,25 +302,7 @@ class MonitoringService : Service() {
 
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.createNotificationChannel(channel)
-
-            Log.d(TAG, "Notification channel created")
+            AppLogger.i(TAG, "Notification channel created")
         }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        isServiceRunning = false
-        SessionStatePref.clear(this)
-        try {
-            accelerometerCollector.stop()
-        } catch (_: Exception) {
-        }
-
-        try {
-            heartRateCollector.stop()
-        } catch (_: Exception) {
-        }
-
-        Log.d(TAG, "Service DESTROYED")
     }
 }
