@@ -14,6 +14,7 @@ import android.os.Looper
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.safeminds.watch.R
+import com.safeminds.watch.data.SessionReader
 import com.safeminds.watch.logging.AppLogger
 import com.safeminds.watch.processing.EpochBuilder
 import com.safeminds.watch.processing.MovementProcessor
@@ -36,6 +37,10 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 import kotlin.math.sqrt
+import com.google.gson.Gson
+import com.safeminds.watch.data.DataDeduplicator
+import com.safeminds.watch.data.SessionMapper
+import com.safeminds.watch.sessionTransfer.TransferResults
 
 class MonitoringService : Service() {
 
@@ -229,11 +234,24 @@ class MonitoringService : Service() {
 
         if (sessionId != null) {
             processAndSaveSession(sessionId)
-            transferController.createSessionRequest(sessionId)
             scope.launch {
-                transferController.sendAgain(sessionId)
+                val result = sender.sendSession(sessionId)
+                when (result) {
+                    is TransferResults.Success -> {
+                        AppLogger.d(TAG, "Session sent successfully: $sessionId")
+                    }
+
+                    is TransferResults.CoverableError -> {
+                        AppLogger.e(TAG, "Recoverable error: ${result.errorReason}")
+                    }
+
+                    is TransferResults.UncoverableError -> {
+                        AppLogger.e(TAG, "Fatal error: ${result.errorReason}")
+                    }
+                }
             }
-        } else {
+        }
+         else {
             AppLogger.w(TAG, "No session ID available; skipping save and transfer")
         }
 
