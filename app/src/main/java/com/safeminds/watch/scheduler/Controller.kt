@@ -108,6 +108,14 @@ object Controller {
 
         val savedSession = SessionStatePref.runningSession(context)
 
+        val staleHourly = savedSession == MonitoringSessionType.HOURLY_CHECK_SESSION &&
+                !MonitoringService.isServiceRunning
+
+        if (staleHourly){
+            Log.d(TAG, "Clearing stale hourly session")
+            SessionStatePref.clear(context)
+        }
+
         val nightRunning =
             MonitoringService.isServiceRunning &&
                     savedSession == MonitoringSessionType.NIGHT_SESSION
@@ -116,6 +124,7 @@ object Controller {
             Log.d(TAG, "Night session already running -> hourly check blocked")
             return false
         }
+
 
         val staleNight =
             savedSession == MonitoringSessionType.NIGHT_SESSION &&

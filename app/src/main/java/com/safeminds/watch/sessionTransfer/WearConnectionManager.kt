@@ -15,6 +15,8 @@ class WearConnectionManager(private val context: Context) {
 
     fun getReachablePhoneNode(): Node? {
         return try {
+            logAllCapabilityNodes()
+
             val capabilityInfo = Tasks.await(
                 Wearable.getCapabilityClient(context).getCapability(
                     SessionTransferContract.PHONE_CAPABILITY,
@@ -37,4 +39,27 @@ class WearConnectionManager(private val context: Context) {
             null
         }
     }
+
+    fun logAllCapabilityNodes() {
+        try {
+            val capabilityInfo = Tasks.await(
+                Wearable.getCapabilityClient(context)
+                    .getCapability(
+                        SessionTransferContract.PHONE_CAPABILITY,
+                        CapabilityClient.FILTER_ALL
+                    )
+            )
+
+            AppLogger.d(TAG, "ALL nodes for capability: ${capabilityInfo.nodes.size}")
+
+            capabilityInfo.nodes.forEach { node ->
+                AppLogger.d(TAG, "Node: ${node.displayName}, nearby=${node.isNearby}, id=${node.id}")
+            }
+
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Failed to fetch ALL capability nodes", e)
+        }
+    }
+
+
 }
